@@ -11,7 +11,7 @@ import {
 import { ClientErrorCode, reportClientError } from '@src/lib/clientErrors'
 import { getKclVersion } from '@src/lib/kclVersion'
 import { Socket, SocketConnectionError } from '@src/lib/socket'
-import { isErr } from '@src/lib/trap'
+import { cleanErrs, isErr } from '@src/lib/trap'
 import { isArray, uuidv4 } from '@src/lib/utils'
 import { withZookeeperWebSocketURL } from '@src/lib/withBaseURL'
 import { isZookeeperBillingError } from '@src/lib/zookeeper/zookeeperBilling'
@@ -535,7 +535,9 @@ class ZookeeperAttachmentReadError extends Error {
   }
 }
 
-export async function toMlCopilotFile(file: File): Promise<MlCopilotFile> {
+export async function toMlCopilotFile(
+  file: File
+): Promise<MlCopilotFile | Error> {
   let data: ArrayBuffer
   try {
     data = await file.arrayBuffer()
@@ -546,9 +548,11 @@ export async function toMlCopilotFile(file: File): Promise<MlCopilotFile> {
       'name' in error &&
       error.name === 'NotFoundError'
     ) {
-      throw new ZookeeperAttachmentReadError(error)
+      return new ZookeeperAttachmentReadError(error)
     }
-    throw error
+    return error instanceof Error
+      ? error
+      : new Error('Unknown attachment read error', { cause: error })
   }
 
   return {
@@ -1355,10 +1359,15 @@ export const zookeeperManagerMachine = setup({
         )
       }
 
-      const additionalFiles =
-        event.additionalFiles && event.additionalFiles.length > 0
-          ? await Promise.all(event.additionalFiles.map(toMlCopilotFile))
-          : undefined
+      let additionalFiles: MlCopilotFile[] | undefined
+      if (event.additionalFiles && event.additionalFiles.length > 0) {
+        const [, convertedFiles, conversionErrors] = cleanErrs(
+          await Promise.all(event.additionalFiles.map(toMlCopilotFile))
+        )
+        const conversionError = conversionErrors[0]
+        if (conversionError) return Promise.reject(conversionError)
+        additionalFiles = convertedFiles
+      }
 
       const request: MlCopilotUserRequest = {
         type: 'user',
