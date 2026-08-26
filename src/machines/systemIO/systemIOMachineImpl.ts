@@ -346,7 +346,7 @@ const sharedBulkWriteImportedProjectFilesWorkflow = async ({
   }
 }
 
-const sharedBulkDeleteWorkflow = async ({
+export const sharedBulkDeleteWorkflow = async ({
   input,
 }: {
   input: {
@@ -357,6 +357,10 @@ const sharedBulkDeleteWorkflow = async ({
     wasmInstance: ModuleType
   }
 }) => {
+  if (!input.filesToDelete?.length) {
+    return 0
+  }
+
   if (!input.context.folders) {
     console.warn('no folders')
     return
@@ -793,8 +797,10 @@ export const systemIOMachineImpl = systemIOMachine.provide({
             onSuccess?: () => void
           }
         }) => {
+          let potentialError = new Error('wasmInstancePromise')
           try {
             const wasmInstance = await input.context.wasmInstancePromise
+            potentialError = new Error('sharedBulkCreateWorkflow')
             const message = await sharedBulkCreateWorkflow({
               input: {
                 ...input,
@@ -803,6 +809,7 @@ export const systemIOMachineImpl = systemIOMachine.provide({
               },
             })
             // We won't delete until everything's created / updated first.
+            potentialError = new Error('sharedBulkDeleteWorkflow')
             const totalDeleted = await sharedBulkDeleteWorkflow({
               input: {
                 ...input,
@@ -811,8 +818,10 @@ export const systemIOMachineImpl = systemIOMachine.provide({
             })
 
             message.message += `, ${totalDeleted} deleted`
+            potentialError = new Error('onFileSystemSuccess')
             input.onFileSystemSuccess?.()
 
+            potentialError = new Error('prepareNavigation')
             const project = input.context.app.project
             const projectIsCurrent =
               input.requestedProjectPath === undefined ||
@@ -836,6 +845,7 @@ export const systemIOMachineImpl = systemIOMachine.provide({
                 deletesRequestedFile)
 
             if (projectIsCurrent && !shouldNavigate) {
+              potentialError = new Error('onSuccess')
               input.onSuccess?.()
             }
 
@@ -855,7 +865,8 @@ export const systemIOMachineImpl = systemIOMachine.provide({
             }
           } catch (error: unknown) {
             input.onFileSystemError?.()
-            return Promise.reject(error)
+            potentialError.cause = error
+            return Promise.reject(potentialError)
           }
         }
       ),

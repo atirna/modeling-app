@@ -9,6 +9,7 @@ import { AreaType, type AreaTypeComponentProps } from '@src/lib/layout/types'
 import type {
   createZookeeperManagerActor,
   stopZookeeperManagerActor,
+  updateZookeeperManagerAuthToken,
   ZookeeperManagerActor,
 } from '@src/lib/zookeeper/zookeeperManagerMachine'
 import { zookeeperPromptRunningSignal } from '@src/lib/zookeeper/zookeeperPromptState'
@@ -27,7 +28,7 @@ const ZookeeperConversationPaneWrapper = lazy(async () => {
 
 type ZookeeperRuntime = ReturnType<typeof createZookeeperRuntime>
 
-type ZookeeperSessionScope = Readonly<{
+type ZookeeperHostScope = Readonly<{
   apiToken: string
   projectPath: string
 }>
@@ -36,35 +37,35 @@ type ZookeeperSession = Readonly<{
   actor: ZookeeperManagerActor
   generation: number
   isCurrent: () => boolean
-  scope: ZookeeperSessionScope
+  projectPath: string
 }>
 
 type ZookeeperHostLease = Readonly<{
-  scope: ZookeeperSessionScope | undefined
+  scope: ZookeeperHostScope | undefined
 }>
 
 type ZookeeperSessionActivation = {
+  apiToken: string
   generation: number
-  scope: ZookeeperSessionScope
+  projectPath: string
+  sendAuthToken?: (apiToken: string) => void
   stop?: () => void
 }
 
 type ZookeeperManagerModule = {
   createZookeeperManagerActor: typeof createZookeeperManagerActor
   stopZookeeperManagerActor: typeof stopZookeeperManagerActor
+  updateZookeeperManagerAuthToken: typeof updateZookeeperManagerAuthToken
 }
 
 const loadZookeeperManager = (): Promise<ZookeeperManagerModule> =>
   import('@src/lib/zookeeper/zookeeperManagerMachine')
 
-function scopesMatch(
-  left: ZookeeperSessionScope | undefined,
-  right: ZookeeperSessionScope | undefined
+function projectPathsMatch(
+  left: { projectPath: string } | undefined,
+  right: { projectPath: string } | undefined
 ) {
-  return (
-    left?.apiToken === right?.apiToken &&
-    left?.projectPath === right?.projectPath
-  )
+  return left?.projectPath === right?.projectPath
 }
 
 // The registry owns the actor and transport. The portal remains a temporary
@@ -88,18 +89,27 @@ export function createZookeeperRuntime(
     previousActivation?.stop?.()
   }
 
-  const setSessionScope = async (scope: ZookeeperSessionScope | undefined) => {
-    if (disposed || scopesMatch(activation?.scope, scope)) {
+  const setSessionScope = async (scope: ZookeeperHostScope | undefined) => {
+    if (disposed) {
+      return
+    }
+
+    if (activation && projectPathsMatch(activation, scope)) {
+      if (scope && activation.apiToken !== scope.apiToken) {
+        activation.apiToken = scope.apiToken
+        activation.sendAuthToken?.(scope.apiToken)
+      }
       return
     }
 
     deactivate()
-    if (!scope) {
+    if (!scope?.apiToken.trim()) {
       return
     }
     const nextActivation: ZookeeperSessionActivation = {
+      apiToken: scope.apiToken,
       generation: ++nextSessionGeneration,
-      scope,
+      projectPath: scope.projectPath,
     }
     activation = nextActivation
 
@@ -108,15 +118,21 @@ export function createZookeeperRuntime(
       if (disposed || activation !== nextActivation) {
         return
       }
+      if (!nextActivation.apiToken.trim()) {
+        activation = undefined
+        return
+      }
 
-      const actor = manager.createZookeeperManagerActor(scope.apiToken)
+      const actor = manager.createZookeeperManagerActor(nextActivation.apiToken)
+      nextActivation.sendAuthToken = (apiToken) =>
+        manager.updateZookeeperManagerAuthToken(actor, apiToken)
       nextActivation.stop = () => manager.stopZookeeperManagerActor(actor)
       session.value = {
         actor,
         generation: nextActivation.generation,
         isCurrent: () =>
           !disposed && hostLease !== undefined && activation === nextActivation,
-        scope,
+        projectPath: nextActivation.projectPath,
       }
     } catch (error: unknown) {
       if (disposed || activation !== nextActivation) {
@@ -136,21 +152,19 @@ export function createZookeeperRuntime(
       void setSessionScope(undefined)
       return
     }
-    if (paneNode.peek()) {
+    if (projectPathsMatch(activation, scope) || paneNode.peek()) {
       void setSessionScope(scope)
       return
     }
     // A closed pane may retain its session, but never starts one for a new scope.
-    if (!scopesMatch(activation?.scope, scope)) {
-      void setSessionScope(undefined)
-    }
+    void setSessionScope(undefined)
   }
 
   return {
     paneNode,
     paneProps,
     session,
-    attachHost(scope: ZookeeperSessionScope | undefined) {
+    attachHost(scope: ZookeeperHostScope | undefined) {
       if (disposed) {
         return () => undefined
       }
@@ -261,15 +275,14 @@ function ZookeeperPortalHost({
   useLayoutEffect(
     () =>
       runtime.attachHost(
-        projectPath && token ? { apiToken: token, projectPath } : undefined
+        projectPath ? { apiToken: token, projectPath } : undefined
       ),
     [projectPath, runtime, token]
   )
 
   if (
     !session ||
-    session.scope.projectPath !== projectPath ||
-    session.scope.apiToken !== token ||
+    session.projectPath !== projectPath ||
     !paneProps ||
     !project
   ) {

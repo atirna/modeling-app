@@ -51,13 +51,15 @@ describe('Zookeeper runtime', () => {
     expect(host).not.toBeInTheDocument()
   })
 
-  it('owns one actor across pane and host remounts', async () => {
+  it('owns one actor across pane closure and auth rotation', async () => {
     const actor = {} as ZookeeperManagerActor
     const createZookeeperManagerActor = vi.fn(() => actor)
     const stopZookeeperManagerActor = vi.fn()
+    const updateZookeeperManagerAuthToken = vi.fn()
     const loadManager = vi.fn(async () => ({
       createZookeeperManagerActor,
       stopZookeeperManagerActor,
+      updateZookeeperManagerAuthToken,
     }))
     const runtime = createZookeeperRuntime(loadManager)
     const scope = { apiToken: 'token', projectPath: '/project' }
@@ -74,28 +76,34 @@ describe('Zookeeper runtime', () => {
     const session = runtime.session.value
 
     detach()
-    runtime.attachPane(outlet)
+    releaseHost()
+    expect(session?.isCurrent()).toBe(false)
+    const releaseRotatedHost = runtime.attachHost({
+      apiToken: 'rotated-token',
+      projectPath: scope.projectPath,
+    })
+    await Promise.resolve()
 
     expect(runtime.session.value?.actor).toBe(actor)
     expect(createZookeeperManagerActor).toHaveBeenCalledOnce()
     expect(stopZookeeperManagerActor).not.toHaveBeenCalled()
+    expect(updateZookeeperManagerAuthToken).toHaveBeenCalledWith(
+      actor,
+      'rotated-token'
+    )
     expect(session?.isCurrent()).toBe(true)
 
-    releaseHost()
-    expect(session?.isCurrent()).toBe(false)
-    const releaseRemountedHost = runtime.attachHost(scope)
-    await Promise.resolve()
-    expect(stopZookeeperManagerActor).not.toHaveBeenCalled()
-    expect(session?.isCurrent()).toBe(true)
+    runtime.attachPane(outlet)
+    expect(runtime.session.value).toBe(session)
 
-    releaseRemountedHost()
+    releaseRotatedHost()
     await vi.waitFor(() => {
       expect(stopZookeeperManagerActor).toHaveBeenCalledWith(actor)
     })
     expect(session?.isCurrent()).toBe(false)
   })
 
-  it('ignores stale loads and defers a hidden project session', async () => {
+  it('uses the latest token and defers a hidden project session', async () => {
     const activeActor = {} as ZookeeperManagerActor
     const replacementActor = {} as ZookeeperManagerActor
     const createZookeeperManagerActor = vi
@@ -103,12 +111,17 @@ describe('Zookeeper runtime', () => {
       .mockReturnValueOnce(activeActor)
       .mockReturnValueOnce(replacementActor)
     const stopZookeeperManagerActor = vi.fn()
-    const manager = { createZookeeperManagerActor, stopZookeeperManagerActor }
+    const updateZookeeperManagerAuthToken = vi.fn()
+    const manager = {
+      createZookeeperManagerActor,
+      stopZookeeperManagerActor,
+      updateZookeeperManagerAuthToken,
+    }
     const managerLoad = deferred<typeof manager>()
     const runtime = createZookeeperRuntime(() => managerLoad.promise)
 
     const firstScope = { apiToken: 'first', projectPath: '/first' }
-    const secondScope = { apiToken: 'second', projectPath: '/second' }
+    const secondScope = { apiToken: 'second', projectPath: '/first' }
     const releaseFirstHost = runtime.attachHost(firstScope)
     const outlet = document.createElement('div')
     const detach = runtime.attachPane(outlet)
@@ -124,7 +137,7 @@ describe('Zookeeper runtime', () => {
     expect(createZookeeperManagerActor).toHaveBeenCalledWith('second')
     expect(runtime.session.value).toMatchObject({
       actor: activeActor,
-      scope: secondScope,
+      projectPath: secondScope.projectPath,
     })
     const activeSession = runtime.session.value
 
@@ -149,7 +162,12 @@ describe('Zookeeper runtime', () => {
   it('does not start an actor after disposal', async () => {
     const createZookeeperManagerActor = vi.fn()
     const stopZookeeperManagerActor = vi.fn()
-    const manager = { createZookeeperManagerActor, stopZookeeperManagerActor }
+    const updateZookeeperManagerAuthToken = vi.fn()
+    const manager = {
+      createZookeeperManagerActor,
+      stopZookeeperManagerActor,
+      updateZookeeperManagerAuthToken,
+    }
     const managerLoad = deferred<typeof manager>()
     const runtime = createZookeeperRuntime(() => managerLoad.promise)
     runtime.attachHost({ apiToken: 'token', projectPath: '/project' })
@@ -161,5 +179,40 @@ describe('Zookeeper runtime', () => {
 
     expect(createZookeeperManagerActor).not.toHaveBeenCalled()
     expect(runtime.session.value).toBeUndefined()
+  })
+
+  it('waits for auth hydration before starting an actor', async () => {
+    const actor = {} as ZookeeperManagerActor
+    const createZookeeperManagerActor = vi.fn(() => actor)
+    const stopZookeeperManagerActor = vi.fn()
+    const updateZookeeperManagerAuthToken = vi.fn()
+    const loadManager = vi.fn(async () => ({
+      createZookeeperManagerActor,
+      stopZookeeperManagerActor,
+      updateZookeeperManagerAuthToken,
+    }))
+    const runtime = createZookeeperRuntime(loadManager)
+    const releaseEmptyHost = runtime.attachHost({
+      apiToken: '',
+      projectPath: '/project',
+    })
+    runtime.attachPane(document.createElement('div'))
+
+    await Promise.resolve()
+    expect(loadManager).not.toHaveBeenCalled()
+
+    releaseEmptyHost()
+    runtime.attachHost({
+      apiToken: 'hydrated-token',
+      projectPath: '/project',
+    })
+
+    await vi.waitFor(() => {
+      expect(runtime.session.value?.actor).toBe(actor)
+    })
+    expect(createZookeeperManagerActor).toHaveBeenCalledWith('hydrated-token')
+    expect(updateZookeeperManagerAuthToken).not.toHaveBeenCalled()
+
+    runtime.dispose()
   })
 })
