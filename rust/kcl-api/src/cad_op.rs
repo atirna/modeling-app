@@ -72,6 +72,17 @@ pub enum Operation {
         /// The source range of the operation in the source code.
         source_range: SourceRange,
     },
+    #[serde(rename_all = "camelCase")]
+    ImportedGeometry {
+        /// The name bound to the imported geometry.
+        name: String,
+        /// The ID of the foreign module backing the imported geometry.
+        module_id: ModuleId,
+        /// The node path of the import statement in the source code.
+        node_path: NodePath,
+        /// The source range of the import statement in the source code.
+        source_range: SourceRange,
+    },
     GroupEnd,
 }
 
@@ -83,6 +94,7 @@ impl Operation {
             Self::VariableDeclaration { .. }
             | Self::GroupBegin { .. }
             | Self::ModuleInstance { .. }
+            | Self::ImportedGeometry { .. }
             | Self::GroupEnd => {}
         }
     }
