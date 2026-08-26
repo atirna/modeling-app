@@ -1,21 +1,23 @@
+import { signal } from '@preact/signals-core'
+import type { KclManager, ZDSProject } from '@src/lang/KclManager'
+import type { BillingRegistryService } from '@src/lib/billing'
 import {
   AreaType,
-  type AreaTypeComponentProps,
+  type Layout,
+  type LayoutService,
   LayoutType,
 } from '@src/lib/layout/types'
+import type { Project } from '@src/lib/project'
+import type {
+  ZookeeperSessionController,
+  ZookeeperSessionControllerDependencies,
+} from '@src/lib/zookeeper/registry/controller'
 import { createZookeeperRuntime } from '@src/lib/zookeeper/registry/runtime'
-import type { ZookeeperManagerActor } from '@src/lib/zookeeper/zookeeperManagerMachine'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-
-const paneProps: AreaTypeComponentProps = {
-  areaConfig: { hide: () => false },
-  layout: {
-    areaType: AreaType.Zookeeper,
-    id: 'zookeeper',
-    label: 'Zookeeper',
-    type: LayoutType.Simple,
-  },
-}
+import type { AuthRegistryService } from '@src/registry/contracts/auth'
+import type { ProjectRuntimeRegistryService } from '@src/registry/contracts/projectRuntime'
+import type { SettingsRegistryService } from '@src/registry/contracts/settings'
+import type { SystemIORegistryService } from '@src/registry/contracts/systemIO'
+import { describe, expect, it, vi } from 'vitest'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -25,194 +27,291 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+function createProject(path: string): ZDSProject {
+  return {
+    projectIORefSignal: signal({ path } as Project),
+  } as ZDSProject
+}
+
+function zookeeperPaneLayout(isOpen: boolean): Layout {
+  return {
+    id: 'custom-pane',
+    label: 'Custom pane',
+    type: LayoutType.Panes,
+    side: 'inline-end',
+    activeIndices: isOpen ? [0] : [],
+    sizes: [100],
+    splitOrientation: 'block',
+    children: [
+      {
+        id: 'custom-zookeeper-child',
+        label: 'Zookeeper',
+        type: LayoutType.Simple,
+        areaType: AreaType.Zookeeper,
+        icon: 'sparkles',
+      },
+    ],
+  }
+}
+
+function createServices({
+  apiToken = 'token',
+  projectPath = '/project',
+}: {
+  apiToken?: string
+  projectPath?: string
+} = {}) {
+  const token = signal(apiToken)
+  const isLoggedIn = signal(true)
+  const currentProject = signal<ZDSProject | undefined>(
+    createProject(projectPath)
+  )
+  const layoutSignal = signal(zookeeperPaneLayout(false))
+  const projectRuntime: ProjectRuntimeRegistryService = {
+    current: currentProject,
+    kclManager: {} as KclManager,
+  }
+
+  return {
+    currentProject,
+    layoutSignal,
+    services: {
+      auth: signal({ isLoggedIn, token } as AuthRegistryService),
+      billing: signal({} as BillingRegistryService),
+      layout: signal({ signal: layoutSignal } as LayoutService),
+      projectRuntime: signal(projectRuntime),
+      settings: signal({} as SettingsRegistryService),
+      systemIO: signal({} as SystemIORegistryService),
+    },
+    isLoggedIn,
+    token,
+  }
+}
+
+function createController(projectPath: string) {
+  const dispose = vi.fn()
+  const updateAuthToken = vi.fn()
+  const controller = {
+    dispose,
+    projectPath,
+    updateAuthToken,
+  } as unknown as ZookeeperSessionController
+
+  return { controller, dispose, updateAuthToken }
+}
+
+function createControllerLoader() {
+  const controllers: ReturnType<typeof createController>[] = []
+  const createZookeeperSessionController = vi.fn(
+    (deps: ZookeeperSessionControllerDependencies) => {
+      const controller = createController(deps.projectPath)
+      controllers.push(controller)
+      return controller.controller
+    }
+  )
+  const loadController = vi.fn(async () => ({
+    createZookeeperSessionController,
+  }))
+
+  return { controllers, createZookeeperSessionController, loadController }
+}
+
 describe('Zookeeper runtime', () => {
-  afterEach(() => document.body.replaceChildren())
+  it('starts lazily only after the pane is opened and auth is hydrated', async () => {
+    const { layoutSignal, services, token } = createServices({ apiToken: '' })
+    const { createZookeeperSessionController, loadController } =
+      createControllerLoader()
+    const runtime = createZookeeperRuntime(services, loadController)
 
-  it('moves one persistent host when the pane closes and reopens', () => {
-    const runtime = createZookeeperRuntime()
-    const firstOutlet = document.createElement('div')
-    const secondOutlet = document.createElement('div')
-    document.body.append(firstOutlet, secondOutlet)
-    const host = runtime.getPortalHost()
+    await Promise.resolve()
+    expect(loadController).not.toHaveBeenCalled()
 
-    runtime.updatePaneProps(paneProps)
-    const detachFirst = runtime.attachPane(firstOutlet)
-    expect(firstOutlet).toContainElement(host)
+    layoutSignal.value = zookeeperPaneLayout(true)
+    await Promise.resolve()
+    expect(loadController).not.toHaveBeenCalled()
 
-    detachFirst()
-    expect(host).not.toBeInTheDocument()
-    expect(runtime.paneProps.value).toBe(paneProps)
-
-    runtime.attachPane(secondOutlet)
-    expect(secondOutlet).toContainElement(host)
-    expect(runtime.getPortalHost()).toBe(host)
-
-    runtime.dispose()
-    expect(host).not.toBeInTheDocument()
-  })
-
-  it('owns one actor across pane closure and auth rotation', async () => {
-    const actor = {} as ZookeeperManagerActor
-    const createZookeeperManagerActor = vi.fn(() => actor)
-    const stopZookeeperManagerActor = vi.fn()
-    const updateZookeeperManagerAuthToken = vi.fn()
-    const loadManager = vi.fn(async () => ({
-      createZookeeperManagerActor,
-      stopZookeeperManagerActor,
-      updateZookeeperManagerAuthToken,
-    }))
-    const runtime = createZookeeperRuntime(loadManager)
-    const scope = { apiToken: 'token', projectPath: '/project' }
-    const releaseHost = runtime.attachHost(scope)
-    const outlet = document.createElement('div')
-
-    expect(loadManager).not.toHaveBeenCalled()
-    const detach = runtime.attachPane(outlet)
+    token.value = 'hydrated-token'
 
     await vi.waitFor(() => {
-      expect(runtime.session.value?.actor).toBe(actor)
+      expect(createZookeeperSessionController).toHaveBeenCalledOnce()
     })
-    expect(loadManager).toHaveBeenCalledOnce()
+    expect(createZookeeperSessionController).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiToken: 'hydrated-token',
+        projectPath: '/project',
+      })
+    )
+
+    runtime.dispose()
+  })
+
+  it('retains the same controller when the pane closes and reopens', async () => {
+    const { layoutSignal, services } = createServices()
+    const { controllers, createZookeeperSessionController, loadController } =
+      createControllerLoader()
+    const runtime = createZookeeperRuntime(services, loadController)
+
+    layoutSignal.value = zookeeperPaneLayout(true)
+    await vi.waitFor(() => {
+      expect(createZookeeperSessionController).toHaveBeenCalledOnce()
+    })
+    expect(runtime.session.value).toBe(controllers[0]?.controller)
     const session = runtime.session.value
 
-    detach()
-    releaseHost()
-    expect(session?.isCurrent()).toBe(false)
-    const releaseRotatedHost = runtime.attachHost({
-      apiToken: 'rotated-token',
-      projectPath: scope.projectPath,
-    })
-    await Promise.resolve()
+    layoutSignal.value = zookeeperPaneLayout(false)
+    expect(controllers[0]?.dispose).not.toHaveBeenCalled()
 
-    expect(runtime.session.value?.actor).toBe(actor)
-    expect(createZookeeperManagerActor).toHaveBeenCalledOnce()
-    expect(stopZookeeperManagerActor).not.toHaveBeenCalled()
-    expect(updateZookeeperManagerAuthToken).toHaveBeenCalledWith(
-      actor,
-      'rotated-token'
-    )
-    expect(session?.isCurrent()).toBe(true)
+    layoutSignal.value = zookeeperPaneLayout(true)
 
-    runtime.attachPane(outlet)
     expect(runtime.session.value).toBe(session)
+    expect(loadController).toHaveBeenCalledOnce()
+    expect(createZookeeperSessionController).toHaveBeenCalledOnce()
+    expect(controllers[0]?.dispose).not.toHaveBeenCalled()
 
-    releaseRotatedHost()
-    await vi.waitFor(() => {
-      expect(stopZookeeperManagerActor).toHaveBeenCalledWith(actor)
-    })
-    expect(session?.isCurrent()).toBe(false)
+    runtime.dispose()
+    expect(controllers[0]?.dispose).toHaveBeenCalledOnce()
   })
 
-  it('uses the latest token and defers a hidden project session', async () => {
-    const activeActor = {} as ZookeeperManagerActor
-    const replacementActor = {} as ZookeeperManagerActor
-    const createZookeeperManagerActor = vi
-      .fn()
-      .mockReturnValueOnce(activeActor)
-      .mockReturnValueOnce(replacementActor)
-    const stopZookeeperManagerActor = vi.fn()
-    const updateZookeeperManagerAuthToken = vi.fn()
-    const manager = {
-      createZookeeperManagerActor,
-      stopZookeeperManagerActor,
-      updateZookeeperManagerAuthToken,
-    }
-    const managerLoad = deferred<typeof manager>()
-    const runtime = createZookeeperRuntime(() => managerLoad.promise)
+  it('updates auth in place without replacing the controller', async () => {
+    const { layoutSignal, services, token } = createServices()
+    const { controllers, createZookeeperSessionController, loadController } =
+      createControllerLoader()
+    const runtime = createZookeeperRuntime(services, loadController)
 
-    const firstScope = { apiToken: 'first', projectPath: '/first' }
-    const secondScope = { apiToken: 'second', projectPath: '/first' }
-    const releaseFirstHost = runtime.attachHost(firstScope)
-    const outlet = document.createElement('div')
-    const detach = runtime.attachPane(outlet)
-    releaseFirstHost()
-    const releaseSecondHost = runtime.attachHost(secondScope)
-
-    managerLoad.resolve(manager)
+    layoutSignal.value = zookeeperPaneLayout(true)
     await vi.waitFor(() => {
-      expect(runtime.session.value?.actor).toBe(activeActor)
+      expect(createZookeeperSessionController).toHaveBeenCalledOnce()
+    })
+    expect(runtime.session.value).toBe(controllers[0]?.controller)
+    const session = runtime.session.value
+
+    token.value = 'rotated-token'
+
+    await vi.waitFor(() => {
+      expect(controllers[0]?.updateAuthToken).toHaveBeenCalledWith(
+        'rotated-token'
+      )
+    })
+    expect(runtime.session.value).toBe(session)
+    expect(createZookeeperSessionController).toHaveBeenCalledOnce()
+
+    runtime.dispose()
+  })
+
+  it('retains an active controller through a transient blank token', async () => {
+    const { layoutSignal, services, token } = createServices()
+    const { controllers, createZookeeperSessionController, loadController } =
+      createControllerLoader()
+    const runtime = createZookeeperRuntime(services, loadController)
+
+    layoutSignal.value = zookeeperPaneLayout(true)
+    await vi.waitFor(() => {
+      expect(createZookeeperSessionController).toHaveBeenCalledOnce()
+    })
+    const session = runtime.session.value
+
+    token.value = ''
+    await vi.waitFor(() => {
+      expect(controllers[0]?.updateAuthToken).toHaveBeenCalledWith('')
+    })
+    expect(runtime.session.value).toBe(session)
+    expect(controllers[0]?.dispose).not.toHaveBeenCalled()
+
+    token.value = 'refreshed-token'
+    await vi.waitFor(() => {
+      expect(controllers[0]?.updateAuthToken).toHaveBeenLastCalledWith(
+        'refreshed-token'
+      )
+    })
+    expect(runtime.session.value).toBe(session)
+    expect(createZookeeperSessionController).toHaveBeenCalledOnce()
+
+    runtime.dispose()
+  })
+
+  it('stops on auth loss and starts fresh after login', async () => {
+    const { isLoggedIn, layoutSignal, services } = createServices()
+    const { controllers, createZookeeperSessionController, loadController } =
+      createControllerLoader()
+    const runtime = createZookeeperRuntime(services, loadController)
+
+    layoutSignal.value = zookeeperPaneLayout(true)
+    await vi.waitFor(() => {
+      expect(createZookeeperSessionController).toHaveBeenCalledOnce()
     })
 
-    expect(createZookeeperManagerActor).toHaveBeenCalledOnce()
-    expect(createZookeeperManagerActor).toHaveBeenCalledWith('second')
-    expect(runtime.session.value).toMatchObject({
-      actor: activeActor,
-      projectPath: secondScope.projectPath,
+    isLoggedIn.value = false
+    await vi.waitFor(() => {
+      expect(controllers[0]?.dispose).toHaveBeenCalledOnce()
     })
-    const activeSession = runtime.session.value
-
-    const thirdScope = { apiToken: 'third', projectPath: '/third' }
-    detach()
-    releaseSecondHost()
-    runtime.attachHost(thirdScope)
-    await Promise.resolve()
-    expect(stopZookeeperManagerActor).toHaveBeenCalledWith(activeActor)
-    expect(activeSession?.isCurrent()).toBe(false)
     expect(runtime.session.value).toBeUndefined()
-    expect(createZookeeperManagerActor).toHaveBeenCalledOnce()
 
-    runtime.attachPane(outlet)
+    isLoggedIn.value = true
     await vi.waitFor(() => {
-      expect(runtime.session.value?.actor).toBe(replacementActor)
+      expect(createZookeeperSessionController).toHaveBeenCalledTimes(2)
     })
+    expect(runtime.session.value).toBe(controllers[1]?.controller)
+
     runtime.dispose()
-    expect(stopZookeeperManagerActor).toHaveBeenCalledWith(replacementActor)
   })
 
-  it('does not start an actor after disposal', async () => {
-    const createZookeeperManagerActor = vi.fn()
-    const stopZookeeperManagerActor = vi.fn()
-    const updateZookeeperManagerAuthToken = vi.fn()
-    const manager = {
-      createZookeeperManagerActor,
-      stopZookeeperManagerActor,
-      updateZookeeperManagerAuthToken,
-    }
-    const managerLoad = deferred<typeof manager>()
-    const runtime = createZookeeperRuntime(() => managerLoad.promise)
-    runtime.attachHost({ apiToken: 'token', projectPath: '/project' })
-    runtime.attachPane(document.createElement('div'))
+  it('stops a stale project and waits to start the hidden replacement', async () => {
+    const { currentProject, layoutSignal, services } = createServices({
+      projectPath: '/first',
+    })
+    const { controllers, createZookeeperSessionController, loadController } =
+      createControllerLoader()
+    const runtime = createZookeeperRuntime(services, loadController)
 
-    runtime.dispose()
-    managerLoad.resolve(manager)
-    await Promise.resolve()
+    layoutSignal.value = zookeeperPaneLayout(true)
+    await vi.waitFor(() => {
+      expect(createZookeeperSessionController).toHaveBeenCalledOnce()
+    })
+    expect(runtime.session.value).toBe(controllers[0]?.controller)
+    layoutSignal.value = zookeeperPaneLayout(false)
+    currentProject.value = createProject('/second')
 
-    expect(createZookeeperManagerActor).not.toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(controllers[0]?.dispose).toHaveBeenCalledOnce()
+    })
     expect(runtime.session.value).toBeUndefined()
-  })
+    expect(createZookeeperSessionController).toHaveBeenCalledOnce()
 
-  it('waits for auth hydration before starting an actor', async () => {
-    const actor = {} as ZookeeperManagerActor
-    const createZookeeperManagerActor = vi.fn(() => actor)
-    const stopZookeeperManagerActor = vi.fn()
-    const updateZookeeperManagerAuthToken = vi.fn()
-    const loadManager = vi.fn(async () => ({
-      createZookeeperManagerActor,
-      stopZookeeperManagerActor,
-      updateZookeeperManagerAuthToken,
-    }))
-    const runtime = createZookeeperRuntime(loadManager)
-    const releaseEmptyHost = runtime.attachHost({
-      apiToken: '',
-      projectPath: '/project',
-    })
-    runtime.attachPane(document.createElement('div'))
-
-    await Promise.resolve()
-    expect(loadManager).not.toHaveBeenCalled()
-
-    releaseEmptyHost()
-    runtime.attachHost({
-      apiToken: 'hydrated-token',
-      projectPath: '/project',
-    })
+    layoutSignal.value = zookeeperPaneLayout(true)
 
     await vi.waitFor(() => {
-      expect(runtime.session.value?.actor).toBe(actor)
+      expect(createZookeeperSessionController).toHaveBeenCalledTimes(2)
     })
-    expect(createZookeeperManagerActor).toHaveBeenCalledWith('hydrated-token')
-    expect(updateZookeeperManagerAuthToken).not.toHaveBeenCalled()
+    expect(runtime.session.value).toBe(controllers[1]?.controller)
 
     runtime.dispose()
+    expect(controllers[1]?.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('does not create a controller when disposed during its lazy load', async () => {
+    const { layoutSignal, services } = createServices()
+    const controllerModule = deferred<{
+      createZookeeperSessionController: (
+        deps: ZookeeperSessionControllerDependencies
+      ) => ZookeeperSessionController
+    }>()
+    const createZookeeperSessionController = vi.fn(
+      (deps: ZookeeperSessionControllerDependencies) =>
+        createController(deps.projectPath).controller
+    )
+    const loadController = vi.fn(() => controllerModule.promise)
+    const runtime = createZookeeperRuntime(services, loadController)
+
+    layoutSignal.value = zookeeperPaneLayout(true)
+    await Promise.resolve()
+    expect(loadController).toHaveBeenCalledOnce()
+
+    runtime.dispose()
+    controllerModule.resolve({ createZookeeperSessionController })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(createZookeeperSessionController).not.toHaveBeenCalled()
+    expect(runtime.session.value).toBeUndefined()
   })
 })

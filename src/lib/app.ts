@@ -61,6 +61,7 @@ import {
   provideCommand,
 } from '@src/registry/contracts/commands'
 import { engineConnectionService } from '@src/registry/contracts/engineConnection'
+import { debugService } from '@src/registry/contracts/debug'
 import { engineSceneRuntimeExtensionsSlot } from '@src/registry/contracts/engineScene'
 import { executingEditorService } from '@src/registry/contracts/executingEditor'
 import {
@@ -73,6 +74,7 @@ import {
   getProjectLibraryCreateProjectOperation,
   projectLibraryTypesValueSpec,
 } from '@src/registry/contracts/projectLibraries'
+import { projectRuntimeService } from '@src/registry/contracts/projectRuntime'
 import {
   type SettingsRegistryService,
   settingsService,
@@ -751,6 +753,20 @@ export class App implements AppSubsystems {
           ),
           provideService(systemIOService, {
             actor: this.systemIOActor,
+          }),
+          provideService(projectRuntimeService, {
+            current: this.projectSignal,
+            kclManager,
+          }),
+          provideService(debugService, {
+            clear: (key, value) => {
+              if (Reflect.get(this.debug, key) === value) {
+                Reflect.deleteProperty(this.debug, key)
+              }
+            },
+            set: (key, value) => {
+              Reflect.set(this.debug, key, value)
+            },
           }),
         ],
       }),

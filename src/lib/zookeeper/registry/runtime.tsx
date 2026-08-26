@@ -3,21 +3,52 @@ import {
   defineRuntimeRegistryItem,
   provide,
 } from '@kittycad/registry'
-import { signal } from '@preact/signals-core'
+import {
+  computed,
+  effect,
+  signal,
+  type ReadonlySignal,
+} from '@preact/signals-core'
 import { useSignals } from '@preact/signals-react/runtime'
-import { AreaType, type AreaTypeComponentProps } from '@src/lib/layout/types'
+import type { BillingRegistryService } from '@src/lib/billing'
+import {
+  AreaType,
+  type AreaTypeComponentProps,
+  type Layout,
+  type LayoutService,
+  LayoutType,
+} from '@src/lib/layout/types'
 import type {
-  createZookeeperManagerActor,
-  stopZookeeperManagerActor,
-  updateZookeeperManagerAuthToken,
-  ZookeeperManagerActor,
-} from '@src/lib/zookeeper/zookeeperManagerMachine'
+  ZookeeperSessionController,
+  ZookeeperSessionControllerDependencies,
+} from '@src/lib/zookeeper/registry/controller'
 import { zookeeperPromptRunningSignal } from '@src/lib/zookeeper/zookeeperPromptState'
-import type { AppHeaderItemProps } from '@src/registry/contracts/appHeader'
-import { appHeaderItemsValueSpec } from '@src/registry/contracts/appHeader'
-import { layoutAreaLibraryValueSpec } from '@src/registry/contracts/layout'
-import { lazy, Suspense, useLayoutEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import {
+  authService,
+  type AuthRegistryService,
+} from '@src/registry/contracts/auth'
+import { billingService } from '@src/registry/contracts/billing'
+import {
+  debugService,
+  type DebugRegistryService,
+} from '@src/registry/contracts/debug'
+import {
+  layoutAreaLibraryValueSpec,
+  layoutService,
+} from '@src/registry/contracts/layout'
+import {
+  projectRuntimeService,
+  type ProjectRuntimeRegistryService,
+} from '@src/registry/contracts/projectRuntime'
+import {
+  settingsService,
+  type SettingsRegistryService,
+} from '@src/registry/contracts/settings'
+import {
+  systemIOService,
+  type SystemIORegistryService,
+} from '@src/registry/contracts/systemIO'
+import { lazy, Suspense } from 'react'
 
 const ZookeeperConversationPaneWrapper = lazy(async () => {
   const { ZookeeperConversationPaneWrapper } = await import(
@@ -28,210 +59,166 @@ const ZookeeperConversationPaneWrapper = lazy(async () => {
 
 type ZookeeperRuntime = ReturnType<typeof createZookeeperRuntime>
 
-type ZookeeperHostScope = Readonly<{
+type ZookeeperRuntimeServices = {
+  auth: ReadonlySignal<AuthRegistryService | undefined>
+  billing: ReadonlySignal<BillingRegistryService | undefined>
+  debug?: ReadonlySignal<DebugRegistryService | undefined>
+  layout: ReadonlySignal<LayoutService | undefined>
+  projectRuntime: ReadonlySignal<ProjectRuntimeRegistryService | undefined>
+  settings: ReadonlySignal<SettingsRegistryService | undefined>
+  systemIO: ReadonlySignal<SystemIORegistryService | undefined>
+}
+
+type ZookeeperSessionControllerModule = {
+  createZookeeperSessionController: (
+    deps: ZookeeperSessionControllerDependencies
+  ) => ZookeeperSessionController
+}
+
+type ZookeeperActivation = {
   apiToken: string
+  controller?: ZookeeperSessionController
   projectPath: string
-}>
-
-type ZookeeperSession = Readonly<{
-  actor: ZookeeperManagerActor
-  generation: number
-  isCurrent: () => boolean
-  projectPath: string
-}>
-
-type ZookeeperHostLease = Readonly<{
-  scope: ZookeeperHostScope | undefined
-}>
-
-type ZookeeperSessionActivation = {
-  apiToken: string
-  generation: number
-  projectPath: string
-  sendAuthToken?: (apiToken: string) => void
-  stop?: () => void
 }
 
-type ZookeeperManagerModule = {
-  createZookeeperManagerActor: typeof createZookeeperManagerActor
-  stopZookeeperManagerActor: typeof stopZookeeperManagerActor
-  updateZookeeperManagerAuthToken: typeof updateZookeeperManagerAuthToken
-}
+const loadZookeeperSessionController = () =>
+  import('@src/lib/zookeeper/registry/controller')
 
-const loadZookeeperManager = (): Promise<ZookeeperManagerModule> =>
-  import('@src/lib/zookeeper/zookeeperManagerMachine')
-
-function projectPathsMatch(
-  left: { projectPath: string } | undefined,
-  right: { projectPath: string } | undefined
-) {
-  return left?.projectPath === right?.projectPath
-}
-
-// The registry owns the actor and transport. The portal remains a temporary
-// bridge for the React-based file, history, reconnect, queue, and billing hooks.
-export function createZookeeperRuntime(
-  loadManager: () => Promise<ZookeeperManagerModule> = loadZookeeperManager
-) {
-  const paneNode = signal<HTMLDivElement | undefined>(undefined)
-  const paneProps = signal<AreaTypeComponentProps | undefined>(undefined)
-  const session = signal<ZookeeperSession | undefined>(undefined)
-  let portalHost: HTMLDivElement | undefined
-  let hostLease: ZookeeperHostLease | undefined
-  let activation: ZookeeperSessionActivation | undefined
-  let nextSessionGeneration = 0
-  let disposed = false
-
-  const deactivate = () => {
-    const previousActivation = activation
-    activation = undefined
-    session.value = undefined
-    previousActivation?.stop?.()
+export function hasOpenZookeeperPane(rootLayout: Layout | undefined): boolean {
+  if (!rootLayout) {
+    return false
   }
 
-  const setSessionScope = async (scope: ZookeeperHostScope | undefined) => {
+  if (rootLayout.type === LayoutType.Simple) {
+    return rootLayout.areaType === AreaType.Zookeeper
+  }
+
+  const children =
+    rootLayout.type === LayoutType.Panes
+      ? rootLayout.activeIndices.map((index) => rootLayout.children[index])
+      : rootLayout.children
+  return children.some(hasOpenZookeeperPane)
+}
+
+export function createZookeeperRuntime(
+  services: ZookeeperRuntimeServices,
+  loadController: () => Promise<ZookeeperSessionControllerModule> = loadZookeeperSessionController
+) {
+  const session = signal<ZookeeperSessionController | undefined>(undefined)
+  const currentProject = computed(
+    () => services.projectRuntime.value?.current.value?.projectIORefSignal.value
+  )
+  let activation: ZookeeperActivation | undefined
+  let disposed = false
+  let stopObserver: (() => void) | undefined
+
+  const deactivate = () => {
+    const previous = activation
+    activation = undefined
+    session.value = undefined
+    previous?.controller?.dispose()
+  }
+
+  const reconcile = () => {
     if (disposed) {
       return
     }
 
-    if (activation && projectPathsMatch(activation, scope)) {
-      if (scope && activation.apiToken !== scope.apiToken) {
-        activation.apiToken = scope.apiToken
-        activation.sendAuthToken?.(scope.apiToken)
-      }
-      return
-    }
+    const auth = services.auth.value
+    const billing = services.billing.value
+    const debug = services.debug?.value
+    const layout = services.layout.value
+    const projectRuntime = services.projectRuntime.value
+    const settings = services.settings.value
+    const systemIO = services.systemIO.value
+    const projectPath =
+      projectRuntime?.current.value?.projectIORefSignal.value.path
+    const apiToken = auth?.token.value ?? ''
+    const isLoggedIn = auth?.isLoggedIn.value ?? false
 
-    deactivate()
-    if (!scope?.apiToken.trim()) {
-      return
+    if (activation && activation.projectPath !== projectPath) {
+      deactivate()
     }
-    const nextActivation: ZookeeperSessionActivation = {
-      apiToken: scope.apiToken,
-      generation: ++nextSessionGeneration,
-      projectPath: scope.projectPath,
-    }
-    activation = nextActivation
-
-    try {
-      const manager = await loadManager()
-      if (disposed || activation !== nextActivation) {
+    const currentActivation = activation
+    if (currentActivation && currentActivation.projectPath === projectPath) {
+      if (!isLoggedIn) {
+        deactivate()
         return
       }
-      if (!nextActivation.apiToken.trim()) {
+      if (currentActivation.apiToken !== apiToken) {
+        currentActivation.apiToken = apiToken
+        currentActivation.controller?.updateAuthToken(apiToken)
+      }
+      return
+    }
+
+    if (
+      !projectPath ||
+      !hasOpenZookeeperPane(layout?.signal.value) ||
+      !isLoggedIn ||
+      !apiToken.trim() ||
+      !auth ||
+      !billing ||
+      !projectRuntime ||
+      !settings ||
+      !systemIO
+    ) {
+      return
+    }
+
+    const next: ZookeeperActivation = { apiToken, projectPath }
+    activation = next
+    void loadController()
+      .then(({ createZookeeperSessionController }) => {
+        if (disposed || activation !== next) {
+          return
+        }
+
+        const controller = createZookeeperSessionController({
+          apiToken: next.apiToken,
+          billing,
+          debug,
+          projectPath,
+          projectRuntime,
+          settings,
+          systemIO,
+        })
+        if (disposed || activation !== next) {
+          controller.dispose()
+          return
+        }
+        next.controller = controller
+        session.value = controller
+      })
+      .catch((error: unknown) => {
+        if (disposed || activation !== next) {
+          return
+        }
         activation = undefined
-        return
-      }
-
-      const actor = manager.createZookeeperManagerActor(nextActivation.apiToken)
-      nextActivation.sendAuthToken = (apiToken) =>
-        manager.updateZookeeperManagerAuthToken(actor, apiToken)
-      nextActivation.stop = () => manager.stopZookeeperManagerActor(actor)
-      session.value = {
-        actor,
-        generation: nextActivation.generation,
-        isCurrent: () =>
-          !disposed && hostLease !== undefined && activation === nextActivation,
-        projectPath: nextActivation.projectPath,
-      }
-    } catch (error: unknown) {
-      if (disposed || activation !== nextActivation) {
-        return
-      }
-      activation = undefined
-      console.error('Failed to start the Zookeeper session.', error)
-    }
+        console.error('Failed to start the Zookeeper session.', error)
+      })
   }
 
-  const reconcileSession = () => {
-    if (!hostLease) {
+  const observe = () => {
+    if (disposed || stopObserver) {
       return
     }
-    const scope = hostLease.scope
-    if (!scope) {
-      void setSessionScope(undefined)
-      return
-    }
-    if (projectPathsMatch(activation, scope) || paneNode.peek()) {
-      void setSessionScope(scope)
-      return
-    }
-    // A closed pane may retain its session, but never starts one for a new scope.
-    void setSessionScope(undefined)
+    stopObserver = effect(reconcile)
   }
+
+  // Runtime services are installed after registry items are flattened.
+  queueMicrotask(observe)
 
   return {
-    paneNode,
-    paneProps,
+    currentProject,
     session,
-    attachHost(scope: ZookeeperHostScope | undefined) {
-      if (disposed) {
-        return () => undefined
-      }
-
-      const lease = { scope }
-      hostLease = lease
-      reconcileSession()
-
-      return () => {
-        if (disposed || hostLease !== lease) {
-          return
-        }
-        hostLease = undefined
-
-        // Preserve the session when React replaces the host in the same turn.
-        queueMicrotask(() => {
-          if (disposed || hostLease) {
-            return
-          }
-          void setSessionScope(undefined)
-        })
-      }
-    },
-    attachPane(node: HTMLDivElement) {
-      if (disposed) {
-        return () => undefined
-      }
-
-      paneNode.value = node
-      if (portalHost) {
-        node.append(portalHost)
-      }
-      reconcileSession()
-
-      return () => {
-        if (paneNode.peek() !== node) {
-          return
-        }
-        paneNode.value = undefined
-        portalHost?.remove()
-      }
-    },
-    updatePaneProps(props: AreaTypeComponentProps) {
-      if (!disposed) {
-        paneProps.value = props
-      }
-    },
-    getPortalHost() {
-      if (!portalHost) {
-        portalHost = document.createElement('div')
-        portalHost.className = 'flex flex-1 min-w-0 min-h-0'
-        portalHost.dataset.zookeeperRuntimeHost = ''
-        paneNode.peek()?.append(portalHost)
-      }
-      return portalHost
-    },
     dispose() {
       if (disposed) {
         return
       }
       disposed = true
-      hostLease = undefined
+      stopObserver?.()
       deactivate()
-      paneNode.value = undefined
-      paneProps.value = undefined
-      portalHost?.remove()
-      portalHost = undefined
     },
   }
 }
@@ -242,77 +229,42 @@ function ZookeeperPaneOutlet({
   onClose,
   runtime,
 }: AreaTypeComponentProps & { runtime: ZookeeperRuntime }) {
-  const outletRef = useRef<HTMLDivElement>(null)
-
-  useLayoutEffect(() => {
-    const outlet = outletRef.current
-    if (!outlet) {
-      return
-    }
-    return runtime.attachPane(outlet)
-  }, [runtime])
-
-  useLayoutEffect(() => {
-    runtime.updatePaneProps({ areaConfig, layout, onClose })
-  }, [areaConfig, layout, onClose, runtime])
-
-  return <div ref={outletRef} className="flex flex-1 min-w-0 min-h-0" />
-}
-
-function ZookeeperPortalHost({
-  app,
-  runtime,
-}: AppHeaderItemProps & { runtime: ZookeeperRuntime }) {
   useSignals()
-  const token = app.auth.useToken()
-  const project = app.project?.projectIORefSignal.value
+  const project = runtime.currentProject.value
+  const controller = runtime.session.value
   const projectPath = project?.path
-  const paneIsAttached = runtime.paneNode.value !== undefined
-  const paneProps = runtime.paneProps.value
-  const session = runtime.session.value
-  const [portalHost] = useState(() => runtime.getPortalHost())
 
-  useLayoutEffect(
-    () =>
-      runtime.attachHost(
-        projectPath ? { apiToken: token, projectPath } : undefined
-      ),
-    [projectPath, runtime, token]
-  )
-
-  if (
-    !session ||
-    session.projectPath !== projectPath ||
-    !paneProps ||
-    !project
-  ) {
+  if (!project || !controller || controller.projectPath !== projectPath) {
     return null
   }
 
-  return createPortal(
+  return (
     <Suspense fallback={null}>
       <ZookeeperConversationPaneWrapper
-        {...paneProps}
-        isPaneVisible={paneIsAttached}
-        isSessionCurrent={session.isCurrent}
+        areaConfig={areaConfig}
+        layout={layout}
+        onClose={onClose}
+        controller={controller}
         theProject={project}
-        zookeeperManagerActor={session.actor}
       />
-    </Suspense>,
-    portalHost,
-    `zookeeper-session-${session.generation}`
+    </Suspense>
   )
 }
 
 export const zookeeperPaneRuntimeRegistryItem = defineRegistryItemFactory(
-  () => {
-    const runtime = createZookeeperRuntime()
+  (ctx) => {
+    const runtime = createZookeeperRuntime({
+      auth: ctx.services.signal(authService),
+      billing: ctx.services.signal(billingService),
+      debug: ctx.services.signal(debugService),
+      layout: ctx.services.signal(layoutService),
+      projectRuntime: ctx.services.signal(projectRuntimeService),
+      settings: ctx.services.signal(settingsService),
+      systemIO: ctx.services.signal(systemIOService),
+    })
 
     const PaneOutlet = (props: AreaTypeComponentProps) => (
       <ZookeeperPaneOutlet {...props} runtime={runtime} />
-    )
-    const PortalHost = (props: AppHeaderItemProps) => (
-      <ZookeeperPortalHost {...props} runtime={runtime} />
     )
 
     return {
@@ -335,14 +287,6 @@ export const zookeeperPaneRuntimeRegistryItem = defineRegistryItemFactory(
               Component: PaneOutlet,
             },
           }),
-          provide(
-            appHeaderItemsValueSpec,
-            {
-              id: 'zookeeper.runtime-host',
-              Component: PortalHost,
-            },
-            { key: 'zookeeper.runtime-host' }
-          ),
         ],
         dispose: () => runtime.dispose(),
       }),

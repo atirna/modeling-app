@@ -1281,7 +1281,7 @@ describe('ZookeeperConversation', () => {
       ).not.toBeInTheDocument()
     })
 
-    test('closes screenshot annotation when the pane is hidden', () => {
+    test('closes screenshot annotation when the pane unmounts', () => {
       const conversationProps = {
         isLoading: false,
         conversation: { exchanges: [] },
@@ -1299,7 +1299,7 @@ describe('ZookeeperConversation', () => {
       }
       const { rerender } = render(
         <>
-          <ZookeeperConversation {...conversationProps} isPaneVisible />
+          <ZookeeperConversation {...conversationProps} />
           <TestEngineSceneStreamLayers />
         </>
       )
@@ -1313,7 +1313,6 @@ describe('ZookeeperConversation', () => {
 
       rerender(
         <>
-          <ZookeeperConversation {...conversationProps} isPaneVisible={false} />
           <TestEngineSceneStreamLayers />
         </>
       )

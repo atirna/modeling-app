@@ -12,6 +12,7 @@ import { dataUrlToFile, takeViewportScreenshot } from '@src/lib/screenshot'
 import { err } from '@src/lib/trap'
 import { isNonNullable } from '@src/lib/utils'
 import { ZookeeperConnectionErrorBanner } from '@src/lib/zookeeper/components/ZookeeperConnectionErrorBanner'
+import type { QueuedMessage } from '@src/lib/zookeeper/registry/controller'
 import type {
   Conversation,
   Exchange,
@@ -29,13 +30,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 const noop = () => {}
 
 export const SHOW_ZOOKEEPER_REASONING_MODE_DROPDOWN = true
-
-export interface QueuedMessage {
-  id: string
-  text: string
-  mode?: MlCopilotModeId
-  attachments: File[]
-}
+export type { QueuedMessage }
 
 export interface ZookeeperConversationProps {
   isLoading: boolean
@@ -74,7 +69,6 @@ export interface ZookeeperConversationProps {
   onSteer: (id: string) => void
   modeOptions?: MlCopilotModeOption[]
   modeScopeKey?: string
-  isPaneVisible?: boolean
 }
 
 const getModeOption = (
@@ -276,7 +270,6 @@ interface ZookeeperConversationInputProps {
   onRemoveFromQueue: (id: string) => void
   modeOptions?: MlCopilotModeOption[]
   modeScopeKey?: string
-  isPaneVisible?: boolean
 }
 
 export const ZookeeperConversationInput = (
@@ -305,12 +298,6 @@ export const ZookeeperConversationInput = (
       stopZoodleRuntimeExtension()
     }
   }, [stopZoodleRuntimeExtension])
-
-  useEffect(() => {
-    if (props.isPaneVisible === false) {
-      stopZoodleRuntimeExtension()
-    }
-  }, [props.isPaneVisible, stopZoodleRuntimeExtension])
 
   // Without this the cursor ends up at the start of the text
   useEffect(() => setValue(props.defaultPrompt || ''), [props.defaultPrompt])
@@ -842,7 +829,6 @@ export const ZookeeperConversation = (props: ZookeeperConversationProps) => {
               onRemoveFromQueue={props.onRemoveFromQueue}
               modeOptions={props.modeOptions}
               modeScopeKey={props.modeScopeKey}
-              isPaneVisible={props.isPaneVisible}
             />
           </div>
         </div>

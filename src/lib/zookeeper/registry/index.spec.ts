@@ -74,7 +74,7 @@ function createTestLayoutServiceRegistryItem(layoutSignal: Signal<Layout>) {
 }
 
 describe('zookeeper plugin', () => {
-  it('contributes the session host, conversation pane, and credits', async () => {
+  it('contributes the conversation pane and credits without a portal host', async () => {
     const { default: zookeeper } = await import('.')
     const layoutSignal = signal(zookeeperPaneLayout())
     const registry = new Registry()
@@ -91,7 +91,7 @@ describe('zookeeper plugin', () => {
     expect(plugin).toBeDefined()
     expect(
       registry.get(appHeaderItemsValueSpec).map((item) => item.id)
-    ).toContain('zookeeper.runtime-host')
+    ).not.toContain('zookeeper.runtime-host')
     const zookeeperArea = registry.get(layoutAreaLibraryValueSpec)[
       AreaType.Zookeeper
     ]
@@ -151,6 +151,6 @@ describe('zookeeper plugin', () => {
     ).toBeDefined()
     expect(
       registry.get(appHeaderItemsValueSpec).map((item) => item.id)
-    ).toContain('zookeeper.runtime-host')
+    ).not.toContain('zookeeper.runtime-host')
   })
 })
